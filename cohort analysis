@@ -1,1 +1,26 @@
-cohort analysis
+-- cohort analysis: phân tích tổ hợp
+/* bài 1: trong những khách hàng thanh toán tiền điện của tháng 1/2017 thì có bao nhiều
+KH quay trở lại thanh toán ở những tháng tiếp theo */
+
+
+WITH next_order as (
+SELECT customer_id, order_id, transaction_date
+    , MIN(MONTH(transaction_date)) OVER(PARTITION BY customer_id ORDER BY transaction_date ASC) as first_month
+    , MONTH(transaction_date) as [month]
+    , MONTH(transaction_date) - MIN(MONTH(transaction_date)) OVER(PARTITION BY customer_id ORDER BY transaction_date ASC) as month_n
+FROM payment_history_17 as his_17
+JOIN Product as pro 
+ON his_17.product_id = pro.product_number
+WHERE sub_category = 'Electricity' and message_id = 1
+)
+, number_customer_month as (
+    SELECT month_n
+    , COUNT(distinct customer_id) as number_customers
+    FROM next_order
+    WHERE first_month = 1
+    GROUP BY month_n
+)
+SELECT *
+    , MAX(number_customers) OVER() as first_month_customers
+    , format(cast(number_customers as decimal)/MAX(number_customers) OVER(), 'p') as retention_rate
+FROM number_customer_month
