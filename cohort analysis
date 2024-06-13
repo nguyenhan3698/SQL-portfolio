@@ -24,3 +24,118 @@ SELECT *
     , MAX(number_customers) OVER() as first_month_customers
     , format(cast(number_customers as decimal)/MAX(number_customers) OVER(), 'p') as retention_rate
 FROM number_customer_month
+
+
+/* bài 2: trong những khách hàng thanh toán tiền điện của năm 2017 thì có bao nhiều				
+KH quay trở lại thanh toán ở những tháng tiếp theo. Biểu diễn heatmap */
+
+WITH next_order as (
+SELECT customer_id, order_id, transaction_date
+    , MIN(MONTH(transaction_date)) OVER(PARTITION BY customer_id ORDER BY transaction_date ASC) as first_month
+    , MONTH(transaction_date) as [month]
+    , MONTH(transaction_date) - MIN(MONTH(transaction_date)) OVER(PARTITION BY customer_id ORDER BY transaction_date ASC) as month_n
+FROM payment_history_17 as his_17
+JOIN Product as pro 
+ON his_17.product_id = pro.product_number
+WHERE sub_category = 'Electricity' and message_id = 1
+)
+, number_customer_month as (
+    SELECT first_month, month_n
+    , COUNT(distinct customer_id) as number_customers
+    FROM next_order
+    GROUP BY first_month, month_n
+)
+, retention_table as (
+    SELECT *
+        , MAX(number_customers) OVER(PARTITION by first_month) as first_month_customers
+        , cast(number_customers as decimal)/MAX(number_customers) OVER(PARTITION by first_month) as retention_rate
+    FROM number_customer_month
+)
+-- pivot table
+SELECT first_month, first_month_customers
+    , "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"
+FROM
+    (SELECT first_month, month_n, first_month_customers, cast(retention_rate as decimal(10,2)) as retention_rate
+    FROM retention_table) as source_table
+PIVOT (
+    SUM(retention_rate)
+    FOR month_n IN ("0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11")
+) as pivot_logic
+ORDER BY first_month
+
+/*Bài 3: Phân nhóm khách hàng dựa theo nhóm hành vi để phát voucher vừa đảm bảo hiệu quả chương trình và tiết kiệm chi phí
+Sử dụng rmf analytics*/
+
+-- RFM Analytics:
+-- B1: Tính RFM cho từng khách hàng
+
+WITH table_rfm as(
+SELECT distinct customer_id
+    , recency = DATEDIFF(day, MAX(transaction_date) OVER(PARTITION BY customer_id), '2018-12-31')
+    , frequency = COUNT(order_id) OVER(PARTITION BY customer_id)
+    , monetary = SUM(cast (final_price as bigint)) OVER(PARTITION BY customer_id)
+FROM
+    (SELECT * FROM payment_history_17 UNION SELECT * FROM payment_history_18) as his
+    JOIN product as pro
+    ON his.product_id = pro.product_number
+WHERE message_id = 1 and sub_category = 'Electricity'
+)
+
+-- b2: Vị trí theo percentile
+, table_rank as(
+    SELECT *
+        , PERCENT_RANK () OVER(ORDER BY recency asc ) AS r_rank
+        , PERCENT_RANK () OVER(ORDER BY frequency desc ) AS f_rank
+        , PERCENT_RANK () OVER(ORDER BY monetary desc ) AS m_rank
+    FROM table_rfm
+)
+
+-- b3: nhóm thánh 4 tiers cho mỗi chỉ số
+, table_tier as(
+    SELECT *
+    , CASE WHEN r_rank <= 0.25 THEN 1
+        WHEN r_rank <= 0.5 THEN 2
+        WHEN r_rank <=0.75 THEN 3
+        ELSE 4
+    END AS r_tier
+    , CASE WHEN f_rank <= 0.25 THEN 1
+        WHEN f_rank <= 0.5 THEN 2
+        WHEN f_rank <=0.75 THEN 3
+        ELSE 4
+    END AS f_tier
+    , CASE WHEN m_rank <= 0.25 THEN 1
+        WHEN m_rank <= 0.5 THEN 2
+        WHEN m_rank <=0.75 THEN 3
+        ELSE 4
+    END AS m_tier
+FROM table_rank
+)
+
+, table_score as (
+SELECT *
+    , CONCAT(r_tier, f_tier, m_tier) as rfm_score
+FROM table_tier
+)
+
+-- b4: phân nhóm theo tổ hợp hành vi
+, table_segment as (
+SELECT *
+    , CASE WHEN rfm_score = 111 THEN 'Best Customer' -- Khách hàng tốt nhất--
+        WHEN rfm_score LIKE '[3-4][3-4][1-4]' THEN 'Lost Bad Customer' -- Khác hàng rời bỏ (trên 55 ngày), mua hàng 1,2 lần thôi
+        WHEN rfm_score LIKE '[3-4]2[1-4]' THEN 'Lost Customer' -- Khách hàng đã rời bỏ nhưng trc đó có mua hàng khá thường xuyên
+        WHEN rfm_score LIKE '21[1-4]' THEN 'Almost Lost' -- Khách hàng tốt nhưng sắp mất
+        WHEN rfm_score LIKE '11[2-4]' THEN 'Loyal Customer'
+        WHEN rfm_score LIKE '[1-2][1-3]1' THEN 'Big Spender' -- chi nhiều tiền
+        WHEN rfm_score LIKE '[1-2]4[1-4]' THEN 'New Customer' -- Khách hàng mới nên là giao dịch ít
+        WHEN rfm_score LIKE '[3-4]1[1-4]' THEN 'Hiberating' -- Khách hàng ngủ đông, trước đó từng rất tốt
+        WHEN rfm_score LIKE '[1-2][2-4][2-4]' THEN 'Potential Loyalist' -- có tiềm năng
+        ELSE 'unknown'
+    END AS segment
+FROM table_score
+)
+
+SELECT segment
+    , count(customer_id) as number_customers
+FROM table_segment
+GROUP BY segment
+ORDER BY number_customers desc
